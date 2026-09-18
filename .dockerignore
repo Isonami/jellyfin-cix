@@ -1,0 +1,10 @@
+**/.git
+**/bin
+**/obj
+**/node_modules
+.build
+config.json
+id_rsa
+id_rsa.pub
+dist/*.buildinfo
+dist/*.changes

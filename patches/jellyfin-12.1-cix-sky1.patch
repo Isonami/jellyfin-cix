@@ -1,0 +1,358 @@
+diff --git a/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs b/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs
+index 6f010c0..99d021d 100644
+--- a/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs
++++ b/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs
+@@ -209,6 +209,22 @@ namespace MediaBrowser.Controller.MediaEncoding
+         public string GetAv1Encoder(EncodingJobInfo state, EncodingOptions encodingOptions)
+             => GetH26xOrAv1Encoder("libsvtav1", "av1", state, encodingOptions);
+ 
++        public string GetVp9Encoder(EncodingJobInfo state, EncodingOptions encodingOptions)
++        {
++            const string defaultEncoder = "vp9";
++            const string cixEncoder = "vp9_v4l2m2m";
++
++            if (state.VideoType == VideoType.VideoFile
++                && encodingOptions.HardwareAccelerationType == HardwareAccelerationType.cix
++                && encodingOptions.EnableHardwareEncoding
++                && _mediaEncoder.SupportsEncoder(cixEncoder))
++            {
++                return cixEncoder;
++            }
++
++            return defaultEncoder;
++        }
++
+         private string GetH26xOrAv1Encoder(string defaultEncoder, string hwEncoder, EncodingJobInfo state, EncodingOptions encodingOptions)
+         {
+             // Only use alternative encoders for video files.
+@@ -227,6 +243,7 @@ namespace MediaBrowser.Controller.MediaEncoding
+                     { HardwareAccelerationType.videotoolbox,         hwEncoder + "_videotoolbox" },
+                     { HardwareAccelerationType.v4l2m2m,              hwEncoder + "_v4l2m2m" },
+                     { HardwareAccelerationType.rkmpp,                hwEncoder + "_rkmpp" },
++                    { HardwareAccelerationType.cix,                  hwEncoder + "_v4l2m2m" },
+                 };
+ 
+                 if (hwType != HardwareAccelerationType.none
+@@ -383,7 +400,14 @@ namespace MediaBrowser.Controller.MediaEncoding
+                 var isVaapiDecoder = vidDecoder.Contains("vaapi", StringComparison.OrdinalIgnoreCase);
+                 var isD3d11vaDecoder = vidDecoder.Contains("d3d11va", StringComparison.OrdinalIgnoreCase);
+                 var isVideoToolBoxDecoder = vidDecoder.Contains("videotoolbox", StringComparison.OrdinalIgnoreCase);
+-                return isSwDecoder || isNvdecDecoder || isVaapiDecoder || isD3d11vaDecoder || isVideoToolBoxDecoder;
++                var isCixDecoder = options.HardwareAccelerationType == HardwareAccelerationType.cix
++                    && vidDecoder.Contains("v4l2m2m", StringComparison.OrdinalIgnoreCase);
++                return isSwDecoder
++                    || isNvdecDecoder
++                    || isVaapiDecoder
++                    || isD3d11vaDecoder
++                    || isVideoToolBoxDecoder
++                    || (isCixDecoder && IsDoviWithHdr10Bl(state.VideoStream));
+             }
+ 
+             // GPU tonemapping supports all HDR RangeTypes
+@@ -505,6 +529,11 @@ namespace MediaBrowser.Controller.MediaEncoding
+                     return GetMjpegEncoder(state, encodingOptions);
+                 }
+ 
++                if (string.Equals(codec, "vp9", StringComparison.OrdinalIgnoreCase))
++                {
++                    return GetVp9Encoder(state, encodingOptions);
++                }
++
+                 if (ContainerValidationRegex().IsMatch(codec))
+                 {
+                     return codec.ToLowerInvariant();
+@@ -1204,6 +1233,28 @@ namespace MediaBrowser.Controller.MediaEncoding
+                 // videotoolbox hw filter does not require device selection
+                 args.Append(GetVideoToolboxDeviceArgs(VideotoolboxAlias));
+             }
++            else if (optHwaccelType == HardwareAccelerationType.cix)
++            {
++                if (!isLinux)
++                {
++                    return string.Empty;
++                }
++
++                var isCixDecoder = vidDecoder.Contains("v4l2m2m", StringComparison.OrdinalIgnoreCase);
++                var isCixEncoder = vidEncoder.Contains("v4l2m2m", StringComparison.OrdinalIgnoreCase);
++                if (!isCixDecoder && !isCixEncoder)
++                {
++                    return string.Empty;
++                }
++
++                // CIX V4L2M2M exposes frames in system memory. OpenCL is a
++                // separate device used for scaling and HDR tone mapping.
++                if (IsOpenclFullSupported())
++                {
++                    args.Append(GetOpenclDeviceArgs(0, null, null, OpenclAlias))
++                        .Append(GetFilterHwDeviceArgs(OpenclAlias));
++                }
++            }
+             else if (optHwaccelType == HardwareAccelerationType.rkmpp)
+             {
+                 if (!isLinux || !_mediaEncoder.SupportsHwaccel("rkmpp"))
+@@ -2297,7 +2348,7 @@ namespace MediaBrowser.Controller.MediaEncoding
+             {
+                 // Currently there's no profile option in av1_nvenc encoder
+                 if (!(string.Equals(videoEncoder, "av1_nvenc", StringComparison.OrdinalIgnoreCase)
+-                      || string.Equals(videoEncoder, "h264_v4l2m2m", StringComparison.OrdinalIgnoreCase)))
++                      || videoEncoder.EndsWith("_v4l2m2m", StringComparison.OrdinalIgnoreCase)))
+                 {
+                     param += " -profile:v:0 " + profile;
+                 }
+@@ -2362,7 +2413,8 @@ namespace MediaBrowser.Controller.MediaEncoding
+                 {
+                     param += " -level " + level;
+                 }
+-                else if (!string.Equals(videoEncoder, "libx265", StringComparison.OrdinalIgnoreCase))
++                else if (!string.Equals(videoEncoder, "libx265", StringComparison.OrdinalIgnoreCase)
++                         && !videoEncoder.EndsWith("_v4l2m2m", StringComparison.OrdinalIgnoreCase))
+                 {
+                     param += " -level " + level;
+                 }
+@@ -5967,6 +6019,127 @@ namespace MediaBrowser.Controller.MediaEncoding
+             return (mainFilters, subFilters, overlayFilters);
+         }
+ 
++        /// <summary>
++        /// Gets the parameter of the CIX Sky1 V4L2M2M/OpenCL filter chain.
++        /// V4L2M2M decode and encode surfaces are system-memory frames, while
++        /// scaling and HDR tone mapping are performed on the Mali OpenCL device.
++        /// </summary>
++        /// <param name="state">Encoding state.</param>
++        /// <param name="options">Encoding options.</param>
++        /// <param name="vidEncoder">Video encoder to use.</param>
++        /// <returns>The tuple contains three lists: main, sub and overlay filters.</returns>
++        public (List<string> MainFilters, List<string> SubFilters, List<string> OverlayFilters) GetCixVidFilterChain(
++            EncodingJobInfo state,
++            EncodingOptions options,
++            string vidEncoder)
++        {
++            if (options.HardwareAccelerationType != HardwareAccelerationType.cix
++                || !OperatingSystem.IsLinux()
++                || !IsOpenclFullSupported())
++            {
++                return GetSwVidFilterChain(state, options, vidEncoder);
++            }
++
++            var inW = state.VideoStream?.Width;
++            var inH = state.VideoStream?.Height;
++            var reqW = state.BaseRequest.Width;
++            var reqH = state.BaseRequest.Height;
++            var reqMaxW = state.BaseRequest.MaxWidth;
++            var reqMaxH = state.BaseRequest.MaxHeight;
++
++            var doDeintH2645 = IsDeinterlaceAvailable(state);
++            var doOclTonemap = IsHwTonemapAvailable(state, options);
++            var hasSubs = state.SubtitleStream is not null && ShouldEncodeSubtitle(state);
++            var hasTextSubs = hasSubs && state.SubtitleStream.IsTextSubtitleStream;
++            var hasGraphicalSubs = hasSubs && !state.SubtitleStream.IsTextSubtitleStream;
++
++            var rotation = state.VideoStream?.Rotation ?? 0;
++            var transposeDir = rotation == 0 ? string.Empty : GetVideoTransposeDirection(state);
++            var doOclTranspose = !string.IsNullOrEmpty(transposeDir)
++                && _mediaEncoder.SupportsFilterWithOption(FilterOptionType.TransposeOpenclReversal);
++            if (rotation != 0 && !doOclTranspose)
++            {
++                return GetSwVidFilterChain(state, options, vidEncoder);
++            }
++
++            var swapWAndH = Math.Abs(rotation) == 90;
++            var swpInW = swapWAndH ? inH : inW;
++            var swpInH = swapWAndH ? inW : inH;
++            var mainFilters = new List<string>
++            {
++                GetOverwriteColorPropertiesParam(state, doOclTonemap)
++            };
++
++            // CIX V4L2M2M returns system-memory frames, so deinterlace before upload.
++            if (doDeintH2645)
++            {
++                mainFilters.Add(GetSwDeinterlaceFilter(state, options));
++            }
++
++            // Sky1 V4L2M2M exposes decoded frames as NV12 even for 10-bit sources.
++            // Keep the system-memory input as NV12 and let scale_opencl perform the
++            // NV12-to-P010 conversion on the GPU when tonemap_opencl needs it.
++            mainFilters.Add("format=nv12");
++            mainFilters.Add("hwupload=derive_device=opencl");
++
++            if (doOclTranspose)
++            {
++                mainFilters.Add($"transpose_opencl=dir={transposeDir}");
++            }
++
++            var scaleOutputFormat = doOclTonemap ? "p010le" : "nv12";
++            var hwScaleFilter = GetHwScaleFilter(
++                "scale",
++                "opencl",
++                scaleOutputFormat,
++                false,
++                swpInW,
++                swpInH,
++                reqW,
++                reqH,
++                reqMaxW,
++                reqMaxH);
++            if (!string.IsNullOrEmpty(hwScaleFilter))
++            {
++                mainFilters.Add(hwScaleFilter + ":algo=bicubic");
++            }
++
++            // Scale first so the GPU both converts NV12 to P010 and reduces the
++            // number of pixels processed by tone mapping.
++            if (doOclTonemap)
++            {
++                mainFilters.Add(GetHwTonemapFilter(options, "opencl", "nv12", false));
++            }
++
++            mainFilters.Add("hwdownload");
++            mainFilters.Add("format=nv12");
++
++            if (hasTextSubs)
++            {
++                mainFilters.Add(GetTextSubtitlesFilter(state, false, false));
++            }
++
++            var subFilters = new List<string>();
++            var overlayFilters = new List<string>();
++            if (hasGraphicalSubs)
++            {
++                var subW = state.SubtitleStream?.Width;
++                var subH = state.SubtitleStream?.Height;
++                subFilters.Add(GetGraphicalSubPreProcessFilters(
++                    swpInW,
++                    swpInH,
++                    subW,
++                    subH,
++                    reqW,
++                    reqH,
++                    reqMaxW,
++                    reqMaxH));
++                overlayFilters.Add("overlay=eof_action=pass:repeatlast=0");
++            }
++
++            return (mainFilters, subFilters, overlayFilters);
++        }
++
+         /// <summary>
+         /// Gets the parameter of Rockchip RKMPP/RKRGA filter chain.
+         /// </summary>
+@@ -6286,6 +6459,7 @@ namespace MediaBrowser.Controller.MediaEncoding
+                 HardwareAccelerationType.nvenc => GetNvidiaVidFilterChain(state, options, outputVideoCodec),
+                 HardwareAccelerationType.videotoolbox => GetAppleVidFilterChain(state, options, outputVideoCodec),
+                 HardwareAccelerationType.rkmpp => GetRkmppVidFilterChain(state, options, outputVideoCodec),
++                HardwareAccelerationType.cix => GetCixVidFilterChain(state, options, outputVideoCodec),
+                 _ => GetSwVidFilterChain(state, options, outputVideoCodec),
+             };
+ 
+@@ -6535,6 +6709,7 @@ namespace MediaBrowser.Controller.MediaEncoding
+                     HardwareAccelerationType.nvenc => GetNvdecVidDecoder(state, options, videoStream, bitDepth),
+                     HardwareAccelerationType.videotoolbox => GetVideotoolboxVidDecoder(state, options, videoStream, bitDepth),
+                     HardwareAccelerationType.rkmpp => GetRkmppVidDecoder(state, options, videoStream, bitDepth),
++                    HardwareAccelerationType.cix => GetCixVidDecoder(options, videoStream, bitDepth),
+                     _ => string.Empty
+                 };
+ 
+@@ -7118,6 +7293,57 @@ namespace MediaBrowser.Controller.MediaEncoding
+             return null;
+         }
+ 
++        /// <summary>
++        /// Gets an explicit CIX Sky1 V4L2M2M decoder argument.
++        /// </summary>
++        /// <param name="options">Encoding options.</param>
++        /// <param name="videoStream">Input video stream.</param>
++        /// <param name="bitDepth">Input video bit depth.</param>
++        /// <returns>The decoder argument, or <see langword="null"/> when unsupported.</returns>
++        public string GetCixVidDecoder(EncodingOptions options, MediaStream videoStream, int bitDepth)
++        {
++            if (!OperatingSystem.IsLinux()
++                || options.HardwareAccelerationType != HardwareAccelerationType.cix)
++            {
++                return null;
++            }
++
++            var is8BitFormat = string.Equals("yuv420p", videoStream.PixelFormat, StringComparison.OrdinalIgnoreCase)
++                               || string.Equals("yuvj420p", videoStream.PixelFormat, StringComparison.OrdinalIgnoreCase);
++            var is10BitFormat = string.Equals("yuv420p10le", videoStream.PixelFormat, StringComparison.OrdinalIgnoreCase);
++            if (!is8BitFormat && !is10BitFormat)
++            {
++                return null;
++            }
++
++            var codec = videoStream.Codec?.ToLowerInvariant();
++            var decoderPrefix = codec switch
++            {
++                "avc" => "h264",
++                "h264" => "h264",
++                "h265" => "hevc",
++                "hevc" => "hevc",
++                "mpeg1video" => "mpeg1",
++                "mpeg2video" => "mpeg2",
++                "mpeg4" => "mpeg4",
++                "vc1" => "vc1",
++                "vp8" => "vp8",
++                "vp9" => "vp9",
++                "av1" => "av1",
++                _ => null
++            };
++            var configuredCodec = codec switch
++            {
++                "avc" => "h264",
++                "h265" => "hevc",
++                _ => codec
++            };
++
++            return decoderPrefix is null
++                ? null
++                : GetHwDecoderName(options, decoderPrefix, "v4l2m2m", configuredCodec, bitDepth);
++        }
++
+         public string GetRkmppVidDecoder(EncodingJobInfo state, EncodingOptions options, MediaStream videoStream, int bitDepth)
+         {
+             var isLinux = OperatingSystem.IsLinux();
+diff --git a/MediaBrowser.MediaEncoding/Encoder/EncoderValidator.cs b/MediaBrowser.MediaEncoding/Encoder/EncoderValidator.cs
+index 99c08eb..f5cb7ca 100644
+--- a/MediaBrowser.MediaEncoding/Encoder/EncoderValidator.cs
++++ b/MediaBrowser.MediaEncoding/Encoder/EncoderValidator.cs
+@@ -51,6 +51,15 @@ namespace MediaBrowser.MediaEncoding.Encoder
+             "vp8_cuvid",
+             "vp9_cuvid",
+             "av1_cuvid",
++            "h264_v4l2m2m",
++            "hevc_v4l2m2m",
++            "mpeg1_v4l2m2m",
++            "mpeg2_v4l2m2m",
++            "mpeg4_v4l2m2m",
++            "vc1_v4l2m2m",
++            "vp8_v4l2m2m",
++            "vp9_v4l2m2m",
++            "av1_v4l2m2m",
+             "h264_rkmpp",
+             "hevc_rkmpp",
+             "mpeg1_rkmpp",
+@@ -93,6 +102,8 @@ namespace MediaBrowser.MediaEncoding.Encoder
+             "av1_vaapi",
+             "mjpeg_vaapi",
+             "h264_v4l2m2m",
++            "hevc_v4l2m2m",
++            "vp9_v4l2m2m",
+             "h264_videotoolbox",
+             "hevc_videotoolbox",
+             "mjpeg_videotoolbox",
+diff --git a/MediaBrowser.Model/Entities/HardwareAccelerationType.cs b/MediaBrowser.Model/Entities/HardwareAccelerationType.cs
+index ece18ec..3e82787 100644
+--- a/MediaBrowser.Model/Entities/HardwareAccelerationType.cs
++++ b/MediaBrowser.Model/Entities/HardwareAccelerationType.cs
+@@ -45,5 +45,10 @@ public enum HardwareAccelerationType
+     /// <summary>
+     /// Rockchip Media Process Platform (RKMPP).
+     /// </summary>
+-    rkmpp = 7
++    rkmpp = 7,
++
++    /// <summary>
++    /// CIX Sky1 V4L2M2M with OpenCL filtering.
++    /// </summary>
++    cix = 8
+ }

@@ -1,0 +1,113 @@
+diff --git a/src/apps/dashboard/features/playback/constants/codecs.ts b/src/apps/dashboard/features/playback/constants/codecs.ts
+index 98b3e5f..153d1dd 100644
+--- a/src/apps/dashboard/features/playback/constants/codecs.ts
++++ b/src/apps/dashboard/features/playback/constants/codecs.ts
+@@ -9,6 +9,7 @@ export const CODECS = [
+             'qsv',
+             'vaapi',
+             'rkmpp',
++            'cix',
+             'videotoolbox',
+             'v4l2m2m'
+         ]
+@@ -22,13 +23,14 @@ export const CODECS = [
+             'qsv',
+             'vaapi',
+             'rkmpp',
++            'cix',
+             'videotoolbox'
+         ]
+     },
+     {
+         name: 'MPEG1',
+         codec: 'mpeg1video',
+-        types: [ 'rkmpp' ]
++        types: [ 'rkmpp', 'cix' ]
+     },
+     {
+         name: 'MPEG2',
+@@ -38,7 +40,8 @@ export const CODECS = [
+             'nvenc',
+             'qsv',
+             'vaapi',
+-            'rkmpp'
++            'rkmpp',
++            'cix'
+         ]
+     },
+     {
+@@ -46,7 +49,8 @@ export const CODECS = [
+         codec: 'mpeg4',
+         types: [
+             'nvenc',
+-            'rkmpp'
++            'rkmpp',
++            'cix'
+         ]
+     },
+     {
+@@ -56,7 +60,8 @@ export const CODECS = [
+             'amf',
+             'nvenc',
+             'qsv',
+-            'vaapi'
++            'vaapi',
++            'cix'
+         ]
+     },
+     {
+@@ -67,6 +72,7 @@ export const CODECS = [
+             'qsv',
+             'vaapi',
+             'rkmpp',
++            'cix',
+             'videotoolbox'
+         ]
+     },
+@@ -79,6 +85,7 @@ export const CODECS = [
+             'qsv',
+             'vaapi',
+             'rkmpp',
++            'cix',
+             'videotoolbox'
+         ]
+     },
+@@ -91,6 +98,7 @@ export const CODECS = [
+             'qsv',
+             'vaapi',
+             'rkmpp',
++            'cix',
+             'videotoolbox'
+         ]
+     }
+@@ -102,7 +110,8 @@ export const HEVC_VP9_HW_DECODING_TYPES = [
+     'nvenc',
+     'qsv',
+     'vaapi',
+-    'rkmpp'
++    'rkmpp',
++    'cix'
+ ];
+ 
+ /** Hardware decoders which support HEVC RExt */
+diff --git a/src/apps/dashboard/routes/playback/transcoding.tsx b/src/apps/dashboard/routes/playback/transcoding.tsx
+index 7d03eea..9424b64 100644
+--- a/src/apps/dashboard/routes/playback/transcoding.tsx
++++ b/src/apps/dashboard/routes/playback/transcoding.tsx
+@@ -149,7 +149,7 @@ export const Component = () => {
+     }, [ config ]);
+ 
+     const hardwareAccelType = config?.HardwareAccelerationType || HardwareAccelerationType.None;
+-    const isHwaSelected = [ 'amf', 'nvenc', 'qsv', 'vaapi', 'rkmpp', 'videotoolbox' ].includes(hardwareAccelType);
++    const isHwaSelected = [ 'amf', 'nvenc', 'qsv', 'vaapi', 'rkmpp', 'cix', 'videotoolbox' ].includes(hardwareAccelType);
+ 
+     const availableCodecs = useMemo(() => (
+         CODECS.filter(codec => codec.types.includes(hardwareAccelType))
+@@ -201,6 +201,7 @@ export const Component = () => {
+                                 <MenuItem value='qsv'>Intel Quicksync (QSV)</MenuItem>
+                                 <MenuItem value='vaapi'>Video Acceleration API (VAAPI)</MenuItem>
+                                 <MenuItem value='rkmpp'>Rockchip MPP (RKMPP)</MenuItem>
++                                <MenuItem value='cix'>CIX Sky1 (V4L2M2M + OpenCL)</MenuItem>
+                                 <MenuItem value='videotoolbox'>Apple VideoToolBox</MenuItem>
+                                 <MenuItem value='v4l2m2m'>Video4Linux2 (V4L2)</MenuItem>
+                             </TextField>

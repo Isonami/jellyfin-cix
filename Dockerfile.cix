@@ -1,0 +1,37 @@
+ARG JELLYFIN_BASE_IMAGE=docker.io/jellyfin/jellyfin:12.1
+ARG IMAGE_VERSION=dev
+
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS server-build
+WORKDIR /src
+COPY jellyfin-server/ ./
+RUN dotnet publish Jellyfin.Server/Jellyfin.Server.csproj \
+    --configuration Release \
+    --runtime linux-arm64 \
+    --self-contained true \
+    --output /out \
+    -p:DebugSymbols=false \
+    -p:DebugType=None
+
+FROM node:24-bookworm-slim AS web-build
+WORKDIR /src
+COPY jellyfin-web/package.json jellyfin-web/package-lock.json ./
+RUN npm ci
+COPY jellyfin-web/ ./
+RUN npm run build:production
+
+FROM ${JELLYFIN_BASE_IMAGE}
+ARG IMAGE_VERSION
+COPY dist/jellyfin-ffmpeg-sky1_arm64.deb /tmp/jellyfin-ffmpeg-sky1.deb
+COPY dist/cix-gpu-umd_arm64.deb /tmp/cix-gpu-umd.deb
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libwayland-client0 \
+        libwayland-server0 \
+        /tmp/cix-gpu-umd.deb \
+        /tmp/jellyfin-ffmpeg-sky1.deb \
+    && rm -f /tmp/cix-gpu-umd.deb /tmp/jellyfin-ffmpeg-sky1.deb \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=server-build /out/ /jellyfin/
+COPY --from=web-build /src/dist/ /jellyfin/jellyfin-web/
+LABEL org.opencontainers.image.title="Jellyfin CIX Sky1 build" \
+      org.opencontainers.image.version="${IMAGE_VERSION}"
